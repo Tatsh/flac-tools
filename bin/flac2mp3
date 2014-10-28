@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+from __future__ import print_function
+import argparse
+import logging
+import os
+import sys
+
+from flactools import convert_flac_to_wav, get_flac_tag
+from flactools.util import encode_wav_to_mp3, get_logger
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('Convert a FLAC file to MP3')
+
+    parser.add_argument('flac_filenames', metavar='FLAC_FILES',
+                        nargs='+', help='FLAC file(s) to convert')
+    parser.add_argument('-o', '--output',
+                        help='If only one FLAC file is being converted, a '
+                             'custom output MP3 filename can be used')
+    parser.add_argument('lame_args', metavar='LAME_ARGS',
+                        nargs=argparse.REMAINDER,
+                        help='LAME arguments. All are supported except '
+                             'for -o')
+    parser.add_argument('--outer-verbose', action='store_true')
+    parser.add_argument('--outer-debug', action='store_true')
+
+    args = parser.parse_args()
+    verbose = args.outer_verbose
+    debug = args.outer_debug
+
+    if verbose or debug:
+        get_logger(logging.INFO if verbose else logging.DEBUG)
+
+    if len(args.flac_filenames) > 1 and args.output is not None:
+        print('Output filename can only be specified if one FLAC file is '
+              'given', file=sys.stderr)
+        sys.exit(1)
+
+    lame_args = args.lame_args
+
+    # Remove -o as it is for something else in LAME and remove the adjacement
+    #   right-most argument
+    for (index, arg) in enumerate(lame_args):
+        if arg == '-o':
+            del lame_args[index]
+            del lame_args[index]
+            break
+
+    if not lame_args:
+        lame_args = ['-V', '0']
+
+    original_lame_args = list(lame_args)
+
+    for filename in args.flac_filenames:
+        lame_args = list(original_lame_args)
+        filename_without_ext, _ = os.path.splitext(filename)
+        wav_filename = convert_flac_to_wav(filename)
+        output_filename = filename_without_ext + '.mp3'
+
+        title = get_flac_tag(filename, 'title')
+        artist = get_flac_tag(filename, 'artist')
+        album = get_flac_tag(filename, 'album')
+        genre = get_flac_tag(filename, 'genre')
+
+        try:
+            year = int(get_flac_tag(filename, 'date'))
+        except ValueError:
+            year = None
+        try:
+            track = int(get_flac_tag(filename, 'tracknumber'))
+        except ValueError:
+            track = None
+
+        has_tags = False
+
+        _ = (
+            ('t', title,),
+            ('a', artist,),
+            ('l', album,),
+            ('y', str(year),),
+            ('g', genre,),
+            ('n', str(track),),
+        )
+
+        for suffix, tag_value in _:
+            if tag_value is not None:
+                has_tags = True
+                lame_args += ['--t%s' % (suffix,), tag_value]
+
+        if has_tags:
+            lame_args += ['--add-id3v2']
+
+        if args.output:
+            output_filename = args.output
+
+        encode_wav_to_mp3(wav_filename, output_filename, lame_args)
+        os.remove(wav_filename)

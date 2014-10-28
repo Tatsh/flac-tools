@@ -1,0 +1,152 @@
+#!/usr/bin/env python
+from __future__ import print_function
+import argparse
+import contextlib
+import logging
+import math
+import os
+import sys
+import time
+import wave
+
+import six
+
+from flactools import convert_flac_to_wav, get_flac_tag
+from flactools.util import (
+    encode_wav_to_mp3,
+    escape_quotes_for_cue as escape_quotes,
+    get_logger,
+    merge_audio,
+)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='Takes a set of split FLACs and converts back to a mixed '
+                    'MP3/CUE')
+
+    parser.add_argument('flac_filenames', metavar='FLAC',
+                        nargs='+', help='FLAC files to merge in order')
+    parser.add_argument('-t', help='Title of album', required=True)
+    parser.add_argument('-a', help='Artist of album', required=True)
+    parser.add_argument('-o', help='Output file name for MP3', required=True)
+    parser.add_argument('-v', '--verbose',
+                        help='Verbose mode',
+                        action='store_true')
+    parser.add_argument('-d', '--debug',
+                        help='Debug mode',
+                        action='store_true')
+
+    args = parser.parse_args()
+    wavs = []
+    tracks = []
+    acculumated_frames = 0
+    mp3_without_ext, _ = os.path.splitext(args.o)
+    cue_filename = mp3_without_ext + '.cue'
+    data = {}
+    mp3_filename = args.o
+
+    if args.verbose or args.debug:
+        log = get_logger(logging.INFO if args.verbose else logging.DEBUG)
+    else:
+        log = get_logger(logging.WARNING)
+
+    for flac_filename in args.flac_filenames:
+        with open(flac_filename):
+            wav_filename = convert_flac_to_wav(flac_filename)
+            data[wav_filename] = {
+                'TITLE': escape_quotes(get_flac_tag(flac_filename, 'TITLE')),
+                'PERFORMER': escape_quotes(
+                    get_flac_tag(flac_filename, 'ARTIST')),
+            }
+
+            log.debug('From %s: %s' % (flac_filename, data[wav_filename],))
+            wavs.append(wav_filename)
+
+    last_acculumated_time = '00:00:00'
+    for wav in wavs:
+        with contextlib.closing(wave.open(wav, 'r')) as f:
+            frames = f.getnframes()
+            acculumated_frames += frames
+            rate = f.getframerate()
+            acculumated_duration = acculumated_frames / float(rate)
+            acculumated_time = time.strftime(
+                '%M:%S', time.gmtime(acculumated_duration))
+
+            if acculumated_duration > 3600:
+                minutes = int(acculumated_time[:2]) + 60
+                acculumated_time = '%s:%s' % (minutes, acculumated_time[3:])
+
+            # add extra frames (75 frames per second in Red Book)
+            extra_seconds = acculumated_duration % 1
+            extra_frames = extra_seconds * 75
+            acculumated_time += ':%s' % (
+                str(int(math.ceil(extra_frames))).rjust(2, '0'))
+
+            tracks.append({
+                'TITLE': data[wav]['TITLE'],
+                'PERFORMER': data[wav]['PERFORMER'],
+                'INDEX 01': last_acculumated_time,
+            })
+
+            last_acculumated_time = acculumated_time
+
+    merged_wav = merge_audio(wavs)
+
+    for wav in wavs:
+        os.remove(wav)
+
+    if not mp3_filename.endswith('.mp3'):
+        mp3_filename += '.mp3'
+
+    encode_wav_to_mp3(merged_wav, mp3_filename)
+    os.remove(merged_wav)
+
+    cue_file_lines = [
+        'PERFORMER "%s"' % (args.a),
+        'TITLE "%s"' % (args.t),
+        'FILE "%s" MP3' % (mp3_filename)
+    ]
+
+    track_no = 1
+    for track_data in tracks:
+        extension = [
+            '  TRACK %s AUDIO' % (str(track_no).rjust(2, '0')),
+        ]
+
+        if track_data['TITLE']:
+            extension.append('    TITLE "%s"' % (track_data['TITLE']))
+
+        if track_data['PERFORMER']:
+            extension.append('    PERFORMER "%s"' %
+                             (track_data['PERFORMER']))
+
+        extension.append('    INDEX 01 %s' % (track_data['INDEX 01']))
+
+        cue_file_lines.extend(extension)
+
+        track_no += 1
+
+    with open(cue_filename, 'w') as f:
+        try:
+            line_count = len(cue_file_lines) + 1
+            cue_file_lines = '\n'.join(cue_file_lines)
+
+            if six.PY2 and isinstance(cue_file_lines, unicode):
+                cue_file_lines = cue_file_lines.encode('utf-8')
+
+            f.write(cue_file_lines)
+            f.write('\n')
+
+            log.info('Wrote %d lines to %s' % (line_count, cue_filename,))
+        except UnicodeEncodeError as e:
+            print(u'Caught UnicodeEncodeError', file=sys.stderr)
+            print(u'    Encoding: %s' % (e.encoding,), file=sys.stderr)
+            print(u'    Reason: %s' % (e.reason,), file=sys.stderr)
+            print(u'    Object: %s' % (e.object,), file=sys.stderr)
+            print(u'    Object type: %s' % (type(e.object),), file=sys.stderr)
+            print(u'    Start: %d, character: %s' % (
+                e.start, e.object[e.start]
+            ), file=sys.stderr)
+            print(u'    End: %d, character: %s' % (e.end, e.object[e.end],),
+                  file=sys.stderr)
